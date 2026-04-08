@@ -36,6 +36,21 @@
   - 全量合并：`~/workspace/claudecode/merged/{project}-session-log.md`
 - **即使 AI 忘记手动追加写入，Hook 也会自动兜底同步**
 
+5. **5MB 滚动归档机制**
+- 合并日志文件（`merged/{project}-session-log.md`）超过 **5MB** 时自动触发滚动归档
+- 归档策略：按时间范围拆分，将较早的会话移入归档文件，保留最新会话在主文件中
+- 归档文件命名：`{project}-session-log.{startDateTime}~{endDateTime}.md`
+- 同名归档已存在时自动追加序号后缀（`.1.md`, `.2.md`, ...）
+- 可通过 `--max-size` 参数自定义阈值（默认 5MB），或设置环境变量调整
+- 确保主日志文件始终保持可控大小，历史记录完整保留在归档文件中
+
+6. **惰性合并机制（兼容 GUI 插件）**
+- Stop Hook 每次触发时检查 `.last_merge_ts` 标记文件
+- 如果距上次合并超过 **30 分钟**，自动执行全量合并 + 滚动归档
+- 解决 IDEA 等 GUI 插件中 `SessionEnd` Hook 无法触发的问题
+- 合并间隔可通过 `--merge-interval` 参数或 `CLAUDE_SESSION_MERGE_INTERVAL` 环境变量自定义
+- 也支持 `--merge-all` 模式独立运行，自动发现所有项目并合并（可用于 cron 兜底）
+
 ---
 
 ## 三、子 Agent 任务编排约定

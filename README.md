@@ -35,29 +35,36 @@
 ## 原理
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Claude Code 会话                      │
-│                                                         │
-│  用户提问 → Claude 回答 → Stop Hook 触发（每次回答后）    │
-│                              ↓                          │
-│                   归档当前会话到日期目录                   │
-│             {date}/{project}/session-log.md              │
-│                                                         │
-│  用户关闭会话（/exit 或 Ctrl+C）→ SessionEnd Hook 触发    │
-│                              ↓                          │
-│              ┌───────────────┴───────────────┐           │
-│              ↓                               ↓           │
-│       全量合并所有会话                  检查是否超 5MB     │
-│  merged/{project}-session-log.md     超限则滚动归档       │
-│                                  {project}-session-log.  │
-│                                  {start}~{end}.md        │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    Claude Code 会话                           │
+│                                                              │
+│  用户提问 → Claude 回答 → Stop Hook 触发（每次回答后）         │
+│                              ↓                               │
+│                   归档当前会话到日期目录                        │
+│             {date}/{project}/session-log.md                   │
+│                              ↓                               │
+│              检查 .last_merge_ts（惰性合并）                   │
+│              距上次合并 ≥ 30 分钟？                            │
+│              ├── 是 → 执行全量合并 + 滚动归档                  │
+│              └── 否 → 跳过（节流）                            │
+│                                                              │
+│  用户关闭会话（/exit 或 Ctrl+C）→ SessionEnd Hook 触发         │
+│                              ↓                               │
+│              ┌───────────────┴───────────────┐                │
+│              ↓                               ↓                │
+│       全量合并所有会话                  检查是否超 5MB          │
+│  merged/{project}-session-log.md     超限则滚动归档            │
+│                                  {project}-session-log.       │
+│                                  {start}~{end}.md             │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 **关键点**：
-- **Stop Hook**（每次回答后）：只归档当前会话，不做全量合并，IO 开销极低
+- **Stop Hook**（每次回答后）：归档当前会话 + 惰性合并（每 30 分钟自动触发全量合并）
 - **SessionEnd Hook**（会话关闭时）：执行全量合并 + 超限滚动归档
+- **惰性合并**：解决 IDEA 等 GUI 插件中 `SessionEnd` Hook 无法触发的问题
 - 合并文件超过 **5MB** 时，自动将旧会话按时间段切分为独立归档文件
+- **`--merge-all` 模式**：独立运行，自动发现所有项目并合并，可用于 cron 兜底
 
 ---
 
@@ -143,14 +150,14 @@ mkdir -p ~/workspace/claudecode/merged
 
 | 组件 | 必选 | 说明 |
 |------|:----:|------|
-| `sync-session-log.py` | **必选** | 核心脚本，负责解析 JSONL、生成 Markdown 日志 |
-| Stop Hook | **必选** | 每次 Claude 回答后归档当前会话到日期目录 |
-| SessionEnd Hook | **必选** | 会话关闭时合并所有会话 + 超限滚动归档 |
+| `sync-session-log.py` | **必选** | 核心脚本，负责解析 JSONL、生成 Markdown 日志、惰性合并、滚动归档 |
+| Stop Hook | **必选** | 每次 Claude 回答后归档当前会话 + 惰性合并（每 30 分钟） |
+| SessionEnd Hook | 推荐 | 会话关闭时合并所有会话 + 超限滚动归档（CLI 场景有效，GUI 插件可能不触发） |
 | 输出目录 `~/workspace/claudecode/` | **必选** | 日志存储位置，脚本会自动创建子目录 |
 | `CLAUDE.md` 全局约定 | 可选 | 定义 AI 在所有项目中的行为规范 |
 | `/convention` 自定义命令 | 可选 | 快速查看当前全局约定规则 |
 | `settings.json` 完整配置 | 可选 | 包含插件、MCP 服务等完整配置模板 |
-| 环境变量自定义 | 可选 | 自定义输出目录、时区等 |
+| 环境变量自定义 | 可选 | 自定义输出目录、时区、合并间隔等 |
 
 ---
 
@@ -197,8 +204,8 @@ global-config/
 
 | 功能 | 必选 | 说明 |
 |------|:----:|------|
-| **Stop Hook** | **必选** | 每次回答后归档当前会话 |
-| **SessionEnd Hook** | **必选** | 会话关闭时合并 + 滚动归档 |
+| **Stop Hook** | **必选** | 每次回答后归档当前会话 + 惰性合并（每 30 分钟） |
+| **SessionEnd Hook** | 推荐 | 会话关闭时合并 + 滚动归档（CLI 场景有效） |
 | **模型配置** | 可选 | 默认 Sonnet（1M 上下文窗口），可切换 Opus |
 | **插件** | 可选 | superpowers、context7、code-review、agent-sdk-dev |
 | **语言** | 可选 | 默认中文交互 |
@@ -241,13 +248,16 @@ chmod +x ~/.claude/scripts/sync-session-log.py
 |----------|--------|------|
 | `CLAUDE_SESSION_LOG_DIR` | `~/workspace/claudecode` | 日志输出根目录 |
 | `CLAUDE_SESSION_LOG_TZ_OFFSET` | `8`（UTC+8） | 时区偏移小时数 |
+| `CLAUDE_SESSION_MERGE_INTERVAL` | `30` | 惰性合并间隔（分钟），Stop Hook 每隔此时间自动触发全量合并 |
 
 脚本还支持命令行参数：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--merge` | 不启用 | 执行全量合并 + 滚动归档（SessionEnd hook 使用） |
+| `--merge-all` | 不启用 | 自动发现所有项目并合并，无需 session_id（独立运行 / cron 使用） |
 | `--max-size` | `5` (MB) | 合并文件超过此大小时触发滚动归档 |
+| `--merge-interval` | `30` (分钟) | 惰性合并间隔，Stop Hook 中超过此时间自动合并 |
 
 示例：
 
@@ -255,6 +265,12 @@ chmod +x ~/.claude/scripts/sync-session-log.py
 # 改为输出到 ~/claude-logs，时区 UTC+9（东京）
 export CLAUDE_SESSION_LOG_DIR=~/claude-logs
 export CLAUDE_SESSION_LOG_TZ_OFFSET=9
+
+# 惰性合并间隔改为 15 分钟
+export CLAUDE_SESSION_MERGE_INTERVAL=15
+
+# 手动触发所有项目合并（可用于 cron 兜底）
+python3 ~/.claude/scripts/sync-session-log.py --merge-all
 ```
 
 ---
@@ -267,16 +283,29 @@ export CLAUDE_SESSION_LOG_TZ_OFFSET=9
 3. 手动测试脚本：`echo '{"session_id":"任意id"}' | python3 ~/.claude/scripts/sync-session-log.py`
 
 ### Q: 合并日志没有更新？
-合并操作仅在 **会话关闭时** 触发（SessionEnd hook）。如需手动触发合并：
+合并操作在以下时机触发：
+1. **惰性合并**（Stop Hook）：每 30 分钟自动触发一次全量合并
+2. **显式合并**（SessionEnd Hook）：会话关闭时触发
+3. **手动合并**：
 ```bash
+# 合并所有项目（推荐）
+python3 ~/.claude/scripts/sync-session-log.py --merge-all
+
+# 合并指定会话
 echo '{"session_id":"你的session_id"}' | python3 ~/.claude/scripts/sync-session-log.py --merge
+```
+
+### Q: 在 IDEA / Cursor 等 GUI 插件中日志不合并？
+这是因为 GUI 插件关闭时不会触发 `SessionEnd` Hook。脚本已内置**惰性合并机制**：Stop Hook 每 30 分钟自动检查并触发全量合并，无需依赖 `SessionEnd`。如果需要调整间隔：
+```bash
+export CLAUDE_SESSION_MERGE_INTERVAL=15  # 改为每 15 分钟
 ```
 
 ### Q: 日志时间不对？
 设置环境变量 `CLAUDE_SESSION_LOG_TZ_OFFSET` 为你所在时区的 UTC 偏移（如北京时间为 `8`）。
 
 ### Q: 会不会影响 Claude Code 性能？
-不会。Stop hook 仅归档当前单个会话（通常 < 0.5 秒）。合并操作只在会话关闭时执行一次。
+不会。Stop hook 大部分时间仅归档当前单个会话（通常 < 0.5 秒）。惰性合并每 30 分钟才触发一次，合并操作也仅在需要时执行。
 
 ### Q: 多个项目会冲突吗？
 不会。脚本按项目目录自动区分，每个项目有独立的日志目录和合并文件。
