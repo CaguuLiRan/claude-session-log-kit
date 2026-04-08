@@ -70,6 +70,19 @@
       },
       "type": "stdio",
       "disabled": false
+    },
+    "Alibaba Cloud Yunxiao DevOps": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "alibabacloud-devops-mcp-server"
+      ],
+      "env": {
+        "YUNXIAO_ACCESS_TOKEN": "<YOUR_YUNXIAO_TOKEN>",
+        "YUNXIAO_API_BASE_URL": "https://openapi-rdc.aliyuncs.com"
+      },
+      "type": "stdio",
+      "disabled": false
     }
   }
 }

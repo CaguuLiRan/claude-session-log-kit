@@ -190,6 +190,7 @@ global-config/
 | `<YOUR_ANTHROPIC_TOKEN>` | **必选** | [console.anthropic.com](https://console.anthropic.com/) |
 | `<YOUR_API_PROXY_URL_IF_NEEDED>` | 可选 | 仅代理/自建网关场景需要，直连 API 可删除此行 |
 | `<YOUR_GITHUB_TOKEN>` | 可选 | [github.com/settings/tokens](https://github.com/settings/tokens)，不使用 GitHub MCP 可删除 |
+| `<YOUR_YUNXIAO_TOKEN>` | 可选 | [阿里云云效个人访问令牌](https://help.aliyun.com/zh/yunxiao/developer-reference/obtain-personal-access-token)，不使用云效 MCP 可删除 |
 | `<YOUR_PROVIDER_ID>` | 可选 | 如未使用 Codemoss 可删除此行 |
 
 ### 配置功能一览
@@ -203,6 +204,7 @@ global-config/
 | **语言** | 可选 | 默认中文交互 |
 | **会话录制** | 可选 | 内置 Markdown 格式录制到 `~/Desktop/claude-sessions` |
 | **MCP 服务** | 可选 | GitHub MCP Server（通过自然语言操作 GitHub） |
+| **MCP 服务** | 可选 | 阿里云云效 DevOps MCP Server（代码管理、项目协作、流水线、制品库等） |
 
 ### 安装全局配置（可选）
 
