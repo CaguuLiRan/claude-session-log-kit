@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-sync-session-log.py — Claude Code Stop Hook
-Reads the current session JSONL, generates session-log.md.
-Called automatically via Stop hook every time Claude finishes responding.
+sync-session-log.py — Claude Code Hook Script (Stop + SessionEnd)
 
-Usage:
-  echo '{"session_id":"xxx"}' | python3 sync-session-log.py
+Two modes:
+  1. Archive mode (default, Stop hook):
+     Only archives the current session to date-organized directory.
+     echo '{"session_id":"xxx"}' | python3 sync-session-log.py
 
-Relies on stdin JSON from Claude Code Stop hook to get session_id,
-then reads the JSONL from ~/.claude/projects/<project-key>/<session_id>.jsonl
+  2. Merge mode (SessionEnd hook):
+     Archives current session + merges ALL sessions + rolling archive.
+     echo '{"session_id":"xxx"}' | python3 sync-session-log.py --merge
 
 Environment:
   CLAUDE_SESSION_LOG_DIR — override output root (default: ~/workspace/claudecode)
   CLAUDE_SESSION_LOG_TZ_OFFSET — timezone offset hours (default: 8 for UTC+8)
 """
 
+import argparse
 import json
 import os
 import sys
+from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -29,6 +32,8 @@ OUTPUT_ROOT = Path(os.environ.get("CLAUDE_SESSION_LOG_DIR",
 TZ_OFFSET_HOURS = int(os.environ.get("CLAUDE_SESSION_LOG_TZ_OFFSET", "8"))
 TZ_OFFSET = timedelta(hours=TZ_OFFSET_HOURS)
 CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
+
+DEFAULT_MAX_SIZE_MB = 5
 
 # ── Noise filters ──
 NOISE_PREFIXES = (
@@ -52,15 +57,28 @@ def is_noise(text: str) -> bool:
             return True
     # Generic XML/HTML system tags (but keep normal text starting with <)
     if stripped.startswith('<') and not stripped.startswith('<a ') and '>' in stripped[:80]:
-        # Likely a system tag, but be conservative
         if any(stripped.startswith(f'<{tag}') for tag in
                ['system', 'command', 'local-', 'search', 'EXTREMELY', 'antml']):
             return True
     return False
 
 
-def read_stdin_session_id():
-    """Read session_id from stdin JSON (Claude Code Stop hook payload)."""
+# ── Args & Input ──
+
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description="Sync Claude Code session logs")
+    parser.add_argument('--merge', action='store_true',
+                        help='Merge all sessions and perform rolling archive (SessionEnd)')
+    parser.add_argument('--max-size', type=int, default=DEFAULT_MAX_SIZE_MB,
+                        help=f'Max merged file size in MB before rotation (default: {DEFAULT_MAX_SIZE_MB})')
+    parser.add_argument('session_id', nargs='?', default=None,
+                        help='Session ID (fallback if not provided via stdin)')
+    return parser.parse_args()
+
+
+def read_stdin_session_id() -> str:
+    """Read session_id from stdin JSON (Claude Code hook payload)."""
     try:
         data = json.loads(sys.stdin.read())
         return data.get("session_id", "")
@@ -86,12 +104,12 @@ def extract_project_name(proj_dir_name: str) -> str:
     e.g. '-Users-liran-workspace-IdeaProjects-gaia-gaia-product' -> 'gaia-product'
     """
     parts = proj_dir_name.strip('-').split('-')
-    # Take last 1-2 meaningful segments
     if len(parts) >= 2:
-        # Check if second-to-last is a common parent like 'gaia'
         return '-'.join(parts[-2:]) if parts[-2] in ('gaia',) else parts[-1]
     return parts[-1] if parts else "unknown"
 
+
+# ── Session Parsing ──
 
 def parse_session(jsonl_path: Path) -> Optional[dict]:
     """Parse a single JSONL session file into structured data."""
@@ -116,7 +134,6 @@ def parse_session(jsonl_path: Path) -> Optional[dict]:
             is_meta = obj.get('isMeta', False)
             ts_str = obj.get('timestamp', '')
 
-            # Always try to extract metadata
             if not git_branch:
                 git_branch = obj.get('gitBranch', '')
             if ts_str and not session_start_ts:
@@ -132,7 +149,6 @@ def parse_session(jsonl_path: Path) -> Optional[dict]:
             role = obj.get('message', {}).get('role', '')
             content = obj.get('message', {}).get('content', '')
 
-            # Extract text parts
             text_parts = []
             if isinstance(content, str):
                 if not is_noise(content):
@@ -151,7 +167,6 @@ def parse_session(jsonl_path: Path) -> Optional[dict]:
             if not combined:
                 continue
 
-            # Format display timestamp
             display_ts = ''
             if ts_str:
                 try:
@@ -182,10 +197,10 @@ def parse_session(jsonl_path: Path) -> Optional[dict]:
     }
 
 
-def generate_markdown(sessions: list, project_name: str) -> str:
-    """Generate merged session-log.md content."""
-    from collections import defaultdict
+# ── Markdown Generation ──
 
+def generate_markdown(sessions: list, project_name: str) -> str:
+    """Generate session-log.md content from a list of parsed sessions."""
     sessions.sort(key=lambda s: s['epoch'])
 
     by_date = defaultdict(list)
@@ -268,24 +283,33 @@ def generate_markdown(sessions: list, project_name: str) -> str:
     return '\n'.join(L)
 
 
-def main():
-    # Read session_id from hook stdin
-    session_id = read_stdin_session_id()
-    if not session_id:
-        # Fallback: try to find from env or args
-        if len(sys.argv) > 1:
-            session_id = sys.argv[1]
-        else:
-            sys.exit(0)  # No session_id, silently exit
+# ── Archive: single session to date directory ──
 
-    # Find project directory
-    proj_dir = find_project_dir(session_id)
-    if not proj_dir:
-        sys.exit(0)
+def archive_current_session(session_id: str, proj_dir: Path, project_name: str):
+    """Archive a single session's JSONL to date-organized markdown."""
+    jsonl_file = proj_dir / f"{session_id}.jsonl"
+    if not jsonl_file.exists():
+        return
 
-    project_name = extract_project_name(proj_dir.name)
+    parsed = parse_session(jsonl_file)
+    if not parsed:
+        return
 
-    # Parse ALL sessions in this project (not just current one)
+    # Write to date directory
+    dir_name = f"{project_name}-{parsed['epoch']}"
+    out_dir = OUTPUT_ROOT / parsed['date'] / dir_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    content = generate_markdown([parsed], project_name)
+    out_file = out_dir / "session-log.md"
+    with open(out_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+# ── Merge: all sessions into one file ──
+
+def merge_all_sessions(proj_dir: Path, project_name: str):
+    """Merge all sessions in the project into a single merged file."""
     sessions = []
     for jsonl_file in sorted(proj_dir.glob("*.jsonl")):
         parsed = parse_session(jsonl_file)
@@ -293,14 +317,9 @@ def main():
             sessions.append(parsed)
 
     if not sessions:
-        sys.exit(0)
+        return sessions
 
-    # Generate markdown
-    content = generate_markdown(sessions, project_name)
-
-    # Write to date-organized directory
-    # Group by date, write per-date files
-    from collections import defaultdict
+    # Also archive each session to its date directory (idempotent)
     by_date = defaultdict(list)
     for s in sessions:
         by_date[s['date']].append(s)
@@ -317,12 +336,144 @@ def main():
         with open(out_file, 'w', encoding='utf-8') as f:
             f.write(date_content)
 
-    # Also write a merged file to the output root for this project
+    # Write merged file
+    content = generate_markdown(sessions, project_name)
     merged_dir = OUTPUT_ROOT / "merged"
     merged_dir.mkdir(parents=True, exist_ok=True)
     merged_file = merged_dir / f"{project_name}-session-log.md"
     with open(merged_file, 'w', encoding='utf-8') as f:
         f.write(content)
+
+    return sessions
+
+
+# ── Rolling archive: split if merged file exceeds max size ──
+
+def rotate_if_needed(project_name: str, max_size_mb: int,
+                     sessions: Optional[List[dict]] = None):
+    """If merged file exceeds max_size_mb, split old sessions into archive files.
+
+    Strategy: time-range splitting
+      merged/
+        {project}-session-log.md                              # latest (always exists)
+        {project}-session-log.{startDate}~{endDate}.md        # archived chunk
+    """
+    merged_dir = OUTPUT_ROOT / "merged"
+    merged_file = merged_dir / f"{project_name}-session-log.md"
+
+    if not merged_file.exists():
+        return
+
+    max_size_bytes = max_size_mb * 1024 * 1024
+    file_size = merged_file.stat().st_size
+
+    if file_size <= max_size_bytes:
+        return  # No rotation needed
+
+    # We need the parsed sessions to split them
+    if sessions is None:
+        # Re-read from merged file is not practical; we need the raw sessions.
+        # This fallback should rarely happen since merge_all_sessions returns them.
+        return
+
+    if len(sessions) <= 1:
+        return  # Can't split a single session
+
+    sessions.sort(key=lambda s: s['epoch'])
+
+    # Determine how many sessions to archive:
+    # Generate markdown for progressively fewer sessions (from the end)
+    # until the remaining file is under the limit.
+    # We try to keep the latest sessions in the main file.
+
+    # First, figure out how much to move out.
+    # Strategy: binary-search-ish — find the split point where
+    # sessions[split_point:] generates content ≤ max_size_bytes
+    split_point = _find_split_point(sessions, project_name, max_size_bytes)
+
+    if split_point <= 0:
+        return  # Nothing to archive
+
+    # Sessions to archive: sessions[:split_point]
+    archive_sessions = sessions[:split_point]
+    remaining_sessions = sessions[split_point:]
+
+    if not remaining_sessions:
+        return  # Don't archive everything
+
+    # Generate archive file
+    start_date = archive_sessions[0]['date']
+    end_date = archive_sessions[-1]['date']
+    archive_filename = f"{project_name}-session-log.{start_date}~{end_date}.md"
+    archive_path = merged_dir / archive_filename
+
+    # If archive file already exists (overlapping range), append a counter
+    if archive_path.exists():
+        counter = 1
+        while archive_path.exists():
+            archive_filename = (f"{project_name}-session-log."
+                                f"{start_date}~{end_date}.{counter}.md")
+            archive_path = merged_dir / archive_filename
+            counter += 1
+
+    archive_content = generate_markdown(archive_sessions, project_name)
+    with open(archive_path, 'w', encoding='utf-8') as f:
+        f.write(archive_content)
+
+    # Rewrite the main merged file with only remaining sessions
+    remaining_content = generate_markdown(remaining_sessions, project_name)
+    with open(merged_file, 'w', encoding='utf-8') as f:
+        f.write(remaining_content)
+
+
+def _find_split_point(sessions: list, project_name: str,
+                      max_size_bytes: int) -> int:
+    """Find the index where sessions[index:] generates markdown ≤ max_size_bytes.
+
+    Uses a simple linear scan from the front — we move sessions out one-by-one
+    until the remaining set is small enough.
+    """
+    total = len(sessions)
+
+    for i in range(1, total):
+        remaining = sessions[i:]
+        content = generate_markdown(remaining, project_name)
+        if len(content.encode('utf-8')) <= max_size_bytes:
+            return i
+
+    # If even a single session is too large, archive all but the last
+    return total - 1
+
+
+# ── Main ──
+
+def main():
+    args = parse_args()
+
+    # Read session_id from stdin (hook payload)
+    session_id = read_stdin_session_id()
+    if not session_id:
+        # Fallback: try from command line arg
+        if args.session_id:
+            session_id = args.session_id
+        else:
+            sys.exit(0)  # No session_id, silently exit
+
+    # Find project directory
+    proj_dir = find_project_dir(session_id)
+    if not proj_dir:
+        sys.exit(0)
+
+    project_name = extract_project_name(proj_dir.name)
+
+    # Always archive the current session
+    archive_current_session(session_id, proj_dir, project_name)
+
+    # Only merge + rotate when --merge is specified (SessionEnd hook)
+    if args.merge:
+        sessions = merge_all_sessions(proj_dir, project_name)
+        if sessions:
+            rotate_if_needed(project_name, args.max_size, sessions)
 
     # Output success (suppressed by hook unless error)
     print(json.dumps({"suppressOutput": True}))

@@ -47,9 +47,9 @@ cp "$SCRIPT_DIR/sync-session-log.py" "$TARGET_SCRIPT_DIR/sync-session-log.py"
 chmod +x "$TARGET_SCRIPT_DIR/sync-session-log.py"
 echo "  ✓ $TARGET_SCRIPT_DIR/sync-session-log.py"
 
-# ── Step 3: 配置 Stop Hook ──
+# ── Step 3: 配置 Hooks (Stop + SessionEnd) ──
 echo ""
-echo "[3/$TOTAL_STEPS] 配置 Stop Hook..."
+echo "[3/$TOTAL_STEPS] 配置 Hooks..."
 
 if [ ! -f "$SETTINGS_FILE" ]; then
     if [ "$INSTALL_FULL" = true ] && [ -f "$SCRIPT_DIR/global-config/settings.json" ]; then
@@ -61,48 +61,70 @@ if [ ! -f "$SETTINGS_FILE" ]; then
         echo "  ✓ 创建新的 $SETTINGS_FILE"
     fi
 else
-    # 已有 settings.json，检查是否已配置 Hook
-    if python3 -c "
+    # 已有 settings.json，合并 Hook 配置
+    python3 -c "
 import json, sys
-with open('$SETTINGS_FILE') as f:
-    data = json.load(f)
-hooks = data.get('hooks', {}).get('Stop', [])
-for hook_group in hooks:
-    for h in hook_group.get('hooks', []):
-        if 'sync-session-log' in h.get('command', ''):
-            sys.exit(0)
-sys.exit(1)
-" 2>/dev/null; then
-        echo "  ✓ Stop Hook 已存在，跳过"
-    else
-        # 合并 Hook 配置
-        python3 -c "
-import json
 
 with open('$SETTINGS_FILE') as f:
     data = json.load(f)
-
-new_hook = {
-    'hooks': [{
-        'type': 'command',
-        'command': 'python3 ~/.claude/scripts/sync-session-log.py',
-        'timeout': 30,
-        'statusMessage': 'Syncing session log...'
-    }]
-}
 
 if 'hooks' not in data:
     data['hooks'] = {}
-if 'Stop' not in data['hooks']:
-    data['hooks']['Stop'] = []
 
-data['hooks']['Stop'].append(new_hook)
+changed = False
 
-with open('$SETTINGS_FILE', 'w') as f:
-    json.dump(data, f, indent=2, ensure_ascii=False)
+# ── Stop Hook (必选：每次回答后归档当前会话) ──
+stop_exists = False
+for hook_group in data.get('hooks', {}).get('Stop', []):
+    for h in hook_group.get('hooks', []):
+        if 'sync-session-log' in h.get('command', ''):
+            stop_exists = True
+            break
+
+if not stop_exists:
+    if 'Stop' not in data['hooks']:
+        data['hooks']['Stop'] = []
+    data['hooks']['Stop'].append({
+        'hooks': [{
+            'type': 'command',
+            'command': 'python3 ~/.claude/scripts/sync-session-log.py',
+            'timeout': 30,
+            'statusMessage': 'Syncing session log...'
+        }]
+    })
+    changed = True
+    print('  ✓ Stop Hook 已配置（每次回答后自动归档）')
+else:
+    print('  ✓ Stop Hook 已存在，跳过')
+
+# ── SessionEnd Hook (必选：会话关闭时合并+滚动归档) ──
+end_exists = False
+for hook_group in data.get('hooks', {}).get('SessionEnd', []):
+    for h in hook_group.get('hooks', []):
+        if 'sync-session-log' in h.get('command', ''):
+            end_exists = True
+            break
+
+if not end_exists:
+    if 'SessionEnd' not in data['hooks']:
+        data['hooks']['SessionEnd'] = []
+    data['hooks']['SessionEnd'].append({
+        'hooks': [{
+            'type': 'command',
+            'command': 'python3 ~/.claude/scripts/sync-session-log.py --merge',
+            'timeout': 60,
+            'statusMessage': 'Merging session logs...'
+        }]
+    })
+    changed = True
+    print('  ✓ SessionEnd Hook 已配置（会话关闭时自动合并）')
+else:
+    print('  ✓ SessionEnd Hook 已存在，跳过')
+
+if changed:
+    with open('$SETTINGS_FILE', 'w') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 "
-        echo "  ✓ 已将 Stop Hook 合并到 $SETTINGS_FILE"
-    fi
 fi
 
 # ── Step 4: 验证基础安装 ──
@@ -122,17 +144,26 @@ if python3 -c "
 import json
 with open('$SETTINGS_FILE') as f:
     data = json.load(f)
-found = False
-for hook_group in data.get('hooks', {}).get('Stop', []):
-    for h in hook_group.get('hooks', []):
+hooks = data.get('hooks', {})
+# Check Stop hook
+stop_ok = False
+for hg in hooks.get('Stop', []):
+    for h in hg.get('hooks', []):
         if 'sync-session-log' in h.get('command', ''):
-            found = True
-if not found:
+            stop_ok = True
+# Check SessionEnd hook
+end_ok = False
+for hg in hooks.get('SessionEnd', []):
+    for h in hg.get('hooks', []):
+        if 'sync-session-log' in h.get('command', ''):
+            end_ok = True
+if not (stop_ok and end_ok):
     raise Exception('Hook not found')
 " 2>/dev/null; then
     echo "  ✓ Stop Hook 已配置"
+    echo "  ✓ SessionEnd Hook 已配置"
 else
-    echo "  ✗ Stop Hook 配置异常！请手动检查 $SETTINGS_FILE"
+    echo "  ✗ Hook 配置异常！请手动检查 $SETTINGS_FILE"
     VERIFY_OK=false
 fi
 
@@ -208,9 +239,14 @@ echo ""
 echo "日志输出目录: $LOG_DIR"
 echo ""
 echo "重新打开 Claude Code 即可生效。"
-echo "每次 Claude 回答后，会话日志将自动同步到:"
+echo "  - Stop Hook:       每次回答后自动归档当前会话"
+echo "  - SessionEnd Hook:  会话关闭时自动合并所有会话"
+echo "  - 滚动归档:         合并文件超过 5MB 时自动按时间段切分"
+echo ""
+echo "输出路径:"
 echo "  - 按日期: $LOG_DIR/{YYYY-MM-DD}/{project}/session-log.md"
-echo "  - 全量:   $LOG_DIR/merged/{project}-session-log.md"
+echo "  - 合并:   $LOG_DIR/merged/{project}-session-log.md"
+echo "  - 归档:   $LOG_DIR/merged/{project}-session-log.{start}~{end}.md"
 
 if [ "$INSTALL_FULL" = true ]; then
     echo ""

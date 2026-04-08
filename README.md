@@ -6,7 +6,7 @@
 
 本方案提供两部分内容：
 
-1. **会话日志自动记录** — 通过 Stop Hook + Python 脚本，零人工干预自动归档每次对话
+1. **会话日志自动记录** — 通过 Stop + SessionEnd Hook，零人工干预自动归档、合并、滚动归档
 2. **全局配置模板** — 经过实战验证的 Claude Code 全局配置，包含行为约定、插件配置、MCP 服务等
 
 ## 效果展示
@@ -15,7 +15,7 @@
 ~/workspace/claudecode/
 ├── 2026-04-03/
 │   └── gaia-product-1712108589/
-│       └── session-log.md          # 当天所有会话
+│       └── session-log.md              # 当天该会话的日志
 ├── 2026-04-07/
 │   └── gaia-product-1712345678/
 │       └── session-log.md
@@ -23,7 +23,8 @@
 │   └── gaia-product-1712567890/
 │       └── session-log.md
 └── merged/
-    └── gaia-product-session-log.md # 该项目全量合并日志
+    ├── gaia-product-session-log.md                         # 最新合并日志（会话关闭时更新）
+    └── gaia-product-session-log.2026-03-30~2026-04-05.md   # 滚动归档（超 5MB 自动切分）
 ```
 
 每个 `session-log.md` 包含：
@@ -34,23 +35,40 @@
 ## 原理
 
 ```
-用户提问 → Claude 回答 → Stop Hook 自动触发
-                              ↓
-                    sync-session-log.py 执行
-                              ↓
-        读取 ~/.claude/projects/<project>/<session>.jsonl
-                              ↓
-              ┌───────────────┴───────────────┐
-              ↓                               ↓
-     按日期归档写入                      全量合并更新
-  {date}/{project}/session-log.md   merged/{project}-session-log.md
+┌─────────────────────────────────────────────────────────┐
+│                    Claude Code 会话                      │
+│                                                         │
+│  用户提问 → Claude 回答 → Stop Hook 触发（每次回答后）    │
+│                              ↓                          │
+│                   归档当前会话到日期目录                   │
+│             {date}/{project}/session-log.md              │
+│                                                         │
+│  用户关闭会话（/exit 或 Ctrl+C）→ SessionEnd Hook 触发    │
+│                              ↓                          │
+│              ┌───────────────┴───────────────┐           │
+│              ↓                               ↓           │
+│       全量合并所有会话                  检查是否超 5MB     │
+│  merged/{project}-session-log.md     超限则滚动归档       │
+│                                  {project}-session-log.  │
+│                                  {start}~{end}.md        │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**关键点**：Claude Code 的每次对话都会写入 JSONL 文件（`~/.claude/projects/` 下），Stop Hook 在每次 Claude 回答结束后自动触发脚本，解析 JSONL 生成可读的 Markdown 日志。
+**关键点**：
+- **Stop Hook**（每次回答后）：只归档当前会话，不做全量合并，IO 开销极低
+- **SessionEnd Hook**（会话关闭时）：执行全量合并 + 超限滚动归档
+- 合并文件超过 **5MB** 时，自动将旧会话按时间段切分为独立归档文件
 
 ---
 
 ## 快速安装
+
+### 前置条件
+
+| 条件 | 说明 |
+|------|------|
+| Python 3.6+ | 脚本运行环境（macOS/Linux 通常自带） |
+| Claude Code CLI | 需要已安装并可正常使用 |
 
 ### 方式一：一键安装（推荐）
 
@@ -64,7 +82,7 @@ bash install.sh
 
 ### 方式二：手动安装（3 步）
 
-#### 1. 复制脚本
+#### 1. 复制脚本（必选）
 
 ```bash
 mkdir -p ~/.claude/scripts
@@ -72,13 +90,14 @@ cp sync-session-log.py ~/.claude/scripts/
 chmod +x ~/.claude/scripts/sync-session-log.py
 ```
 
-#### 2. 配置 Stop Hook
+#### 2. 配置 Hooks（必选）
 
 将以下内容合并到 `~/.claude/settings.json`：
 
 ```jsonc
 {
   "hooks": {
+    // [必选] 每次回答后归档当前会话
     "Stop": [
       {
         "hooks": [
@@ -90,6 +109,19 @@ chmod +x ~/.claude/scripts/sync-session-log.py
           }
         ]
       }
+    ],
+    // [必选] 会话关闭时合并所有会话 + 滚动归档
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/scripts/sync-session-log.py --merge",
+            "timeout": 60,
+            "statusMessage": "Merging session logs..."
+          }
+        ]
+      }
     ]
   }
 }
@@ -97,13 +129,28 @@ chmod +x ~/.claude/scripts/sync-session-log.py
 
 > 完整的 `settings.json` 示例见 `settings-hook-only.json`。
 
-#### 3. 创建输出目录
+#### 3. 创建输出目录（必选）
 
 ```bash
 mkdir -p ~/workspace/claudecode/merged
 ```
 
 安装完成！重新打开 Claude Code，每次对话结束后日志会自动同步。
+
+---
+
+## 安装组件一览
+
+| 组件 | 必选 | 说明 |
+|------|:----:|------|
+| `sync-session-log.py` | **必选** | 核心脚本，负责解析 JSONL、生成 Markdown 日志 |
+| Stop Hook | **必选** | 每次 Claude 回答后归档当前会话到日期目录 |
+| SessionEnd Hook | **必选** | 会话关闭时合并所有会话 + 超限滚动归档 |
+| 输出目录 `~/workspace/claudecode/` | **必选** | 日志存储位置，脚本会自动创建子目录 |
+| `CLAUDE.md` 全局约定 | 可选 | 定义 AI 在所有项目中的行为规范 |
+| `/convention` 自定义命令 | 可选 | 快速查看当前全局约定规则 |
+| `settings.json` 完整配置 | 可选 | 包含插件、MCP 服务等完整配置模板 |
+| 环境变量自定义 | 可选 | 自定义输出目录、时区等 |
 
 ---
 
@@ -130,7 +177,7 @@ global-config/
 | 约定 | 内容 |
 |------|------|
 | **编码行为** | 严禁自动 git commit/push，所有提交需用户手动确认 |
-| **会话日志** | 自动归档对话记录到 `~/workspace/claudecode/`，Stop Hook 兜底同步 |
+| **会话日志** | 自动归档对话记录到 `~/workspace/claudecode/`，Hook 兜底同步 |
 | **子 Agent** | 允许创建子 agent 做任务拆解和并行执行，但必须继承全局约定 |
 | **默认约束** | 回答简洁专业、代码保证可运行、不擅自扩展范围 |
 
@@ -138,38 +185,39 @@ global-config/
 
 模板已脱敏，使用前需替换以下占位符：
 
-| 占位符 | 说明 | 获取方式 |
-|--------|------|----------|
-| `<YOUR_ANTHROPIC_TOKEN>` | Anthropic API Token | [console.anthropic.com](https://console.anthropic.com/) |
-| `<YOUR_API_PROXY_URL_IF_NEEDED>` | API 代理地址（非必需） | 仅代理/自建网关场景需要，直连 API 可删除此行 |
-| `<YOUR_GITHUB_TOKEN>` | GitHub Personal Access Token | [github.com/settings/tokens](https://github.com/settings/tokens) |
-| `<YOUR_PROVIDER_ID>` | Codemoss Provider ID（非必需） | 如未使用 Codemoss 可删除此行 |
+| 占位符 | 必选 | 获取方式 |
+|--------|:----:|----------|
+| `<YOUR_ANTHROPIC_TOKEN>` | **必选** | [console.anthropic.com](https://console.anthropic.com/) |
+| `<YOUR_API_PROXY_URL_IF_NEEDED>` | 可选 | 仅代理/自建网关场景需要，直连 API 可删除此行 |
+| `<YOUR_GITHUB_TOKEN>` | 可选 | [github.com/settings/tokens](https://github.com/settings/tokens)，不使用 GitHub MCP 可删除 |
+| `<YOUR_PROVIDER_ID>` | 可选 | 如未使用 Codemoss 可删除此行 |
 
 ### 配置功能一览
 
-| 功能 | 说明 |
-|------|------|
-| **模型配置** | 默认 Sonnet（1M 上下文窗口），可切换 Opus |
-| **插件** | superpowers（增强工作流）、context7（文档查询）、code-review、agent-sdk-dev |
-| **语言** | 默认中文交互 |
-| **会话录制** | 内置 Markdown 格式录制到 `~/Desktop/claude-sessions` |
-| **Stop Hook** | 每次回答后自动同步会话日志 |
-| **MCP 服务** | GitHub MCP Server（通过自然语言操作 GitHub） |
+| 功能 | 必选 | 说明 |
+|------|:----:|------|
+| **Stop Hook** | **必选** | 每次回答后归档当前会话 |
+| **SessionEnd Hook** | **必选** | 会话关闭时合并 + 滚动归档 |
+| **模型配置** | 可选 | 默认 Sonnet（1M 上下文窗口），可切换 Opus |
+| **插件** | 可选 | superpowers、context7、code-review、agent-sdk-dev |
+| **语言** | 可选 | 默认中文交互 |
+| **会话录制** | 可选 | 内置 Markdown 格式录制到 `~/Desktop/claude-sessions` |
+| **MCP 服务** | 可选 | GitHub MCP Server（通过自然语言操作 GitHub） |
 
-### 安装全局配置
+### 安装全局配置（可选）
 
 ```bash
-# 复制全局约定
+# 复制全局约定（可选）
 cp global-config/CLAUDE.md ~/.claude/CLAUDE.md
 
-# 复制完整配置（需先编辑替换 Token 占位符）
+# 复制完整配置（可选，需先编辑替换 Token 占位符）
 cp global-config/settings.json ~/.claude/settings.json
 
-# 复制自定义命令
+# 复制自定义命令（可选）
 mkdir -p ~/.claude/commands
 cp -r global-config/commands/* ~/.claude/commands/
 
-# 复制脚本
+# 复制脚本（必选，一键安装已自动完成）
 mkdir -p ~/.claude/scripts
 cp global-config/scripts/sync-session-log.py ~/.claude/scripts/
 chmod +x ~/.claude/scripts/sync-session-log.py
@@ -192,6 +240,13 @@ chmod +x ~/.claude/scripts/sync-session-log.py
 | `CLAUDE_SESSION_LOG_DIR` | `~/workspace/claudecode` | 日志输出根目录 |
 | `CLAUDE_SESSION_LOG_TZ_OFFSET` | `8`（UTC+8） | 时区偏移小时数 |
 
+脚本还支持命令行参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--merge` | 不启用 | 执行全量合并 + 滚动归档（SessionEnd hook 使用） |
+| `--max-size` | `5` (MB) | 合并文件超过此大小时触发滚动归档 |
+
 示例：
 
 ```bash
@@ -205,18 +260,27 @@ export CLAUDE_SESSION_LOG_TZ_OFFSET=9
 ## 常见问题
 
 ### Q: 日志没有生成？
-1. 确认 `~/.claude/settings.json` 中 `hooks.Stop` 配置正确
+1. 确认 `~/.claude/settings.json` 中 `hooks.Stop` 和 `hooks.SessionEnd` 配置正确
 2. 确认脚本有执行权限：`chmod +x ~/.claude/scripts/sync-session-log.py`
 3. 手动测试脚本：`echo '{"session_id":"任意id"}' | python3 ~/.claude/scripts/sync-session-log.py`
+
+### Q: 合并日志没有更新？
+合并操作仅在 **会话关闭时** 触发（SessionEnd hook）。如需手动触发合并：
+```bash
+echo '{"session_id":"你的session_id"}' | python3 ~/.claude/scripts/sync-session-log.py --merge
+```
 
 ### Q: 日志时间不对？
 设置环境变量 `CLAUDE_SESSION_LOG_TZ_OFFSET` 为你所在时区的 UTC 偏移（如北京时间为 `8`）。
 
 ### Q: 会不会影响 Claude Code 性能？
-不会。脚本执行时间通常 < 1 秒，超时上限 30 秒，且在 Claude 回答完成后才触发。
+不会。Stop hook 仅归档当前单个会话（通常 < 0.5 秒）。合并操作只在会话关闭时执行一次。
 
 ### Q: 多个项目会冲突吗？
 不会。脚本按项目目录自动区分，每个项目有独立的日志目录和合并文件。
+
+### Q: 合并文件太大怎么办？
+脚本内置滚动归档机制：当合并文件超过 5MB 时，会自动将旧会话按时间段切分为独立归档文件（如 `project-session-log.2026-03-30~2026-04-05.md`），最新的合并文件只保留近期会话。可通过 `--max-size` 参数调整阈值。
 
 ### Q: settings.json 直接覆盖安全吗？
 建议手动合并。如果你已有自定义配置（其他 MCP 服务、环境变量等），直接覆盖会丢失这些配置。
@@ -231,7 +295,7 @@ claude-session-log-kit/
 ├── sync-session-log.py                # 核心脚本（放到 ~/.claude/scripts/）
 ├── settings-hook-only.json            # 最小化 settings.json（仅 Hook 部分）
 ├── install.sh                         # 一键安装脚本
-└── global-config/                     # 全局配置模板
+└── global-config/                     # 全局配置模板（可选）
     ├── CLAUDE.md                      # 全局行为约定
     ├── settings.json                  # 完整配置（已脱敏，需填 Token）
     ├── commands/

@@ -44,6 +44,18 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/scripts/sync-session-log.py --merge",
+            "timeout": 60,
+            "statusMessage": "Merging session logs..."
+          }
+        ]
+      }
     ]
   },
   "mcpServers": {
