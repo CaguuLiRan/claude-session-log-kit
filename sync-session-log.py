@@ -270,9 +270,8 @@ def generate_markdown(sessions: list, project_name: str) -> str:
 
         for s in date_sessions:
             global_idx += 1
-            anchor = f'<a id="session-{global_idx}"></a>'
-
-            L.append(f"## {anchor}Session {global_idx} — "
+            # 使用 <span id=""> 包裹标题，避免空 <a> 标签在 Typora 中显示
+            L.append(f"## <span id=\"session-{global_idx}\">Session {global_idx}</span> — "
                      f"{date_str} {s['start_time']}")
             L.append("")
             L.append("| Key | Value |")
