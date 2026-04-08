@@ -1,43 +1,67 @@
 #!/bin/bash
-# Claude Code 会话日志自动记录 - 一键安装脚本
-# 用法: bash install.sh
+# Claude Code 会话日志自动记录 & 全局配置 - 一键安装脚本
+# 用法:
+#   bash install.sh          # 仅安装日志功能
+#   bash install.sh --full   # 安装日志功能 + 全局配置
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_SCRIPT_DIR="$HOME/.claude/scripts"
+TARGET_COMMANDS_DIR="$HOME/.claude/commands"
 SETTINGS_FILE="$HOME/.claude/settings.json"
 LOG_DIR="${CLAUDE_SESSION_LOG_DIR:-$HOME/workspace/claudecode}"
+INSTALL_FULL=false
 
-echo "=========================================="
-echo "  Claude Code 会话日志 - 一键安装"
-echo "=========================================="
+# 解析参数
+for arg in "$@"; do
+    case $arg in
+        --full) INSTALL_FULL=true ;;
+    esac
+done
+
+if [ "$INSTALL_FULL" = true ]; then
+    echo "============================================"
+    echo "  Claude Code 全套配置 - 一键安装"
+    echo "============================================"
+    TOTAL_STEPS=6
+else
+    echo "============================================"
+    echo "  Claude Code 会话日志 - 一键安装"
+    echo "============================================"
+    TOTAL_STEPS=4
+fi
 echo ""
 
-# 1. 创建目录
-echo "[1/4] 创建必要目录..."
+# ── Step 1: 创建目录 ──
+echo "[1/$TOTAL_STEPS] 创建必要目录..."
 mkdir -p "$TARGET_SCRIPT_DIR"
 mkdir -p "$LOG_DIR/merged"
 echo "  ✓ $TARGET_SCRIPT_DIR"
 echo "  ✓ $LOG_DIR/merged"
 
-# 2. 复制脚本
+# ── Step 2: 复制脚本 ──
 echo ""
-echo "[2/4] 安装同步脚本..."
+echo "[2/$TOTAL_STEPS] 安装同步脚本..."
 cp "$SCRIPT_DIR/sync-session-log.py" "$TARGET_SCRIPT_DIR/sync-session-log.py"
 chmod +x "$TARGET_SCRIPT_DIR/sync-session-log.py"
 echo "  ✓ $TARGET_SCRIPT_DIR/sync-session-log.py"
 
-# 3. 配置 settings.json
+# ── Step 3: 配置 Stop Hook ──
 echo ""
-echo "[3/4] 配置 Stop Hook..."
+echo "[3/$TOTAL_STEPS] 配置 Stop Hook..."
 
 if [ ! -f "$SETTINGS_FILE" ]; then
-    # 没有 settings.json，直接用模板
-    cp "$SCRIPT_DIR/settings-hook-only.json" "$SETTINGS_FILE"
-    echo "  ✓ 创建新的 $SETTINGS_FILE"
+    if [ "$INSTALL_FULL" = true ] && [ -f "$SCRIPT_DIR/global-config/settings.json" ]; then
+        cp "$SCRIPT_DIR/global-config/settings.json" "$SETTINGS_FILE"
+        echo "  ✓ 使用完整配置模板创建 $SETTINGS_FILE"
+        echo "  ⚠ 请编辑 $SETTINGS_FILE 替换 <YOUR_*> 占位符为你的实际 Token"
+    else
+        cp "$SCRIPT_DIR/settings-hook-only.json" "$SETTINGS_FILE"
+        echo "  ✓ 创建新的 $SETTINGS_FILE"
+    fi
 else
-    # 已有 settings.json，检查是否已配置
+    # 已有 settings.json，检查是否已配置 Hook
     if python3 -c "
 import json, sys
 with open('$SETTINGS_FILE') as f:
@@ -81,15 +105,17 @@ with open('$SETTINGS_FILE', 'w') as f:
     fi
 fi
 
-# 4. 验证
+# ── Step 4: 验证基础安装 ──
 echo ""
-echo "[4/4] 验证安装..."
+echo "[4/$TOTAL_STEPS] 验证基础安装..."
+
+VERIFY_OK=true
 
 if [ -f "$TARGET_SCRIPT_DIR/sync-session-log.py" ]; then
     echo "  ✓ 脚本已就位"
 else
     echo "  ✗ 脚本安装失败！"
-    exit 1
+    VERIFY_OK=false
 fi
 
 if python3 -c "
@@ -107,13 +133,77 @@ if not found:
     echo "  ✓ Stop Hook 已配置"
 else
     echo "  ✗ Stop Hook 配置异常！请手动检查 $SETTINGS_FILE"
+    VERIFY_OK=false
+fi
+
+if [ "$VERIFY_OK" = false ]; then
+    echo ""
+    echo "基础安装存在问题，请检查上述错误。"
     exit 1
 fi
 
+# ── Full mode: Step 5 & 6 ──
+if [ "$INSTALL_FULL" = true ]; then
+
+    # Step 5: 安装全局约定和自定义命令
+    echo ""
+    echo "[5/$TOTAL_STEPS] 安装全局约定和自定义命令..."
+
+    if [ -f "$SCRIPT_DIR/global-config/CLAUDE.md" ]; then
+        if [ -f "$HOME/.claude/CLAUDE.md" ]; then
+            # 备份已有的 CLAUDE.md
+            BACKUP_FILE="$HOME/.claude/CLAUDE.md.bak.$(date +%s)"
+            cp "$HOME/.claude/CLAUDE.md" "$BACKUP_FILE"
+            echo "  ⚠ 已备份现有 CLAUDE.md → $(basename $BACKUP_FILE)"
+        fi
+        cp "$SCRIPT_DIR/global-config/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
+        echo "  ✓ 全局约定 CLAUDE.md 已安装"
+    fi
+
+    if [ -d "$SCRIPT_DIR/global-config/commands" ]; then
+        mkdir -p "$TARGET_COMMANDS_DIR"
+        cp -r "$SCRIPT_DIR/global-config/commands/"* "$TARGET_COMMANDS_DIR/"
+        echo "  ✓ 自定义命令已安装到 $TARGET_COMMANDS_DIR"
+        # 列出已安装的命令
+        for cmd_file in "$SCRIPT_DIR/global-config/commands/"*.md; do
+            if [ -f "$cmd_file" ]; then
+                cmd_name=$(basename "$cmd_file" .md)
+                echo "    - /$cmd_name"
+            fi
+        done
+    fi
+
+    # Step 6: 验证全局配置
+    echo ""
+    echo "[6/$TOTAL_STEPS] 验证全局配置..."
+
+    if [ -f "$HOME/.claude/CLAUDE.md" ]; then
+        echo "  ✓ CLAUDE.md 已就位"
+    else
+        echo "  ✗ CLAUDE.md 安装失败"
+    fi
+
+    if [ -f "$TARGET_COMMANDS_DIR/convention.md" ]; then
+        echo "  ✓ /convention 命令已就位"
+    else
+        echo "  ⚠ /convention 命令未找到（可选）"
+    fi
+
+    # 检查 settings.json 中是否有未替换的占位符
+    if grep -q '<YOUR_' "$SETTINGS_FILE" 2>/dev/null; then
+        echo ""
+        echo "  ⚠ settings.json 中发现未替换的占位符:"
+        grep -o '<YOUR_[A-Z_]*>' "$SETTINGS_FILE" 2>/dev/null | sort -u | while read placeholder; do
+            echo "    - $placeholder"
+        done
+        echo "  请编辑 $SETTINGS_FILE 替换为你的实际值"
+    fi
+fi
+
 echo ""
-echo "=========================================="
+echo "============================================"
 echo "  安装完成！"
-echo "=========================================="
+echo "============================================"
 echo ""
 echo "日志输出目录: $LOG_DIR"
 echo ""
@@ -121,4 +211,13 @@ echo "重新打开 Claude Code 即可生效。"
 echo "每次 Claude 回答后，会话日志将自动同步到:"
 echo "  - 按日期: $LOG_DIR/{YYYY-MM-DD}/{project}/session-log.md"
 echo "  - 全量:   $LOG_DIR/merged/{project}-session-log.md"
+
+if [ "$INSTALL_FULL" = true ]; then
+    echo ""
+    echo "全局配置已安装，包含:"
+    echo "  - CLAUDE.md（全局行为约定）"
+    echo "  - /convention 命令"
+    echo "  - 完整 settings.json 模板"
+fi
+
 echo ""
