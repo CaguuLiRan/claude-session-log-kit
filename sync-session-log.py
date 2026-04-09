@@ -59,6 +59,20 @@ NOISE_PREFIXES = (
     'Caveat:',
 )
 
+# ── git commit agent 会话过滤 ──
+# 如果整个会话是内置 git commit agent 触发的交互，直接跳过不持久化
+def is_git_commit_session(messages: list) -> bool:
+    """检测是否为 git commit agent 产生的会话。"""
+    keywords = {'git', 'commit'}
+    for msg in messages:
+        content = msg.get('content', '').lower()
+        # 需要同时包含多个关键词才判定为 git commit 会话
+        if all(k in content for k in keywords):
+            # 进一步确认：通常包含 message 或 conventional 字样
+            if 'message' in content or 'conventional' in content:
+                return True
+    return False
+
 
 def is_noise(text: str) -> bool:
     """判断文本是否为系统噪声（应被过滤）。"""
@@ -203,6 +217,10 @@ def parse_session(jsonl_path: Path) -> Optional[dict]:
     if not messages or not session_start_ts:
         return None
 
+    # 检测是否为 git commit agent 会话，如果是则跳过不持久化
+    if is_git_commit_session(messages):
+        return None
+
     local_ts = session_start_ts + TZ_OFFSET
     return {
         'session_id': jsonl_path.stem,
@@ -313,7 +331,9 @@ def archive_current_session(session_id: str, proj_dir: Path, project_name: str):
         return
 
     # 写入按日期组织的目录
-    dir_name = f"{project_name}-{parsed['epoch']}"
+    # 使用 HHMMSS 格式，去掉冒号
+    time_hhmmss = parsed['start_time'].replace(':', '')
+    dir_name = f"{project_name}-{time_hhmmss}"
     out_dir = OUTPUT_ROOT / parsed['date'] / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -343,8 +363,10 @@ def merge_all_sessions(proj_dir: Path, project_name: str):
 
     for date_str in sorted(by_date.keys()):
         date_sessions = by_date[date_str]
-        first_epoch = date_sessions[0]['epoch']
-        dir_name = f"{project_name}-{first_epoch}"
+        first_session = date_sessions[0]
+        # 使用 HHMMSS 格式，去掉冒号
+        time_hhmmss = first_session['start_time'].replace(':', '')
+        dir_name = f"{project_name}-{time_hhmmss}"
         out_dir = OUTPUT_ROOT / date_str / dir_name
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -410,8 +432,8 @@ def rotate_if_needed(project_name: str, max_size_mb: int,
 
     策略：按时间范围切分
       merged/
-        {project}-session-log.md                              # 最新（始终存在）
-        {project}-session-log.{startDate}~{endDate}.md        # 归档分片
+        {project}-session-log.md                                      # 最新（始终存在）
+        {project}-session-log.2026-03-30-143025~2026-04-05-091548.md # 归档分片（开始日期时间~结束日期时间）
     """
     merged_dir = OUTPUT_ROOT / "merged"
     merged_file = merged_dir / f"{project_name}-session-log.md"
@@ -455,17 +477,18 @@ def rotate_if_needed(project_name: str, max_size_mb: int,
         return  # 不能归档全部会话
 
     # 生成归档文件
-    start_date = archive_sessions[0]['date']
-    end_date = archive_sessions[-1]['date']
-    archive_filename = f"{project_name}-session-log.{start_date}~{end_date}.md"
+    # 格式: YYYY-MM-DD-HHMMSS (日期+时间，去掉冒号)
+    start_dt = f"{archive_sessions[0]['date']}-{archive_sessions[0]['start_time'].replace(':', '')}"
+    end_dt = f"{archive_sessions[-1]['date']}-{archive_sessions[-1]['start_time'].replace(':', '')}"
+    archive_filename = f"{project_name}-session-log.{start_dt}~{end_dt}.md"
     archive_path = merged_dir / archive_filename
 
-    # 如果归档文件已存在（时间范围重叠），追加序号后缀
+    # 如果归档文件已存在（同一时间范围多次归档），追加序号后缀
     if archive_path.exists():
         counter = 1
         while archive_path.exists():
             archive_filename = (f"{project_name}-session-log."
-                                f"{start_date}~{end_date}.{counter}.md")
+                                f"{start_dt}~{end_dt}.{counter}.md")
             archive_path = merged_dir / archive_filename
             counter += 1
 
