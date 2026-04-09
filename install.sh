@@ -20,16 +20,35 @@ for arg in "$@"; do
     esac
 done
 
-if [ "$INSTALL_FULL" = true ]; then
+# 检测是否已安装
+INSTALL_EXISTED=false
+if [ -f "$TARGET_SCRIPT_DIR/sync-session-log.py" ]; then
+    INSTALL_EXISTED=true
+fi
+
+if [ "$INSTALL_EXISTED" = true ]; then
     echo "============================================"
-    echo "  Claude Code 全套配置 - 一键安装"
+    if [ "$INSTALL_FULL" = true ]; then
+        echo "  Claude Code 全套配置 - 更新安装"
+    else
+        echo "  Claude Code 会话日志 - 更新安装"
+    fi
     echo "============================================"
-    TOTAL_STEPS=6
+    echo "⚠  检测到已安装版本，本次操作将覆盖升级脚本"
+    echo "    原有脚本会备份为: sync-session-log.py.bak"
+    echo ""
 else
-    echo "============================================"
-    echo "  Claude Code 会话日志 - 一键安装"
-    echo "============================================"
-    TOTAL_STEPS=4
+    if [ "$INSTALL_FULL" = true ]; then
+        echo "============================================"
+        echo "  Claude Code 全套配置 - 一键安装"
+        echo "============================================"
+        TOTAL_STEPS=6
+    else
+        echo "============================================"
+        echo "  Claude Code 会话日志 - 一键安装"
+        echo "============================================"
+        TOTAL_STEPS=4
+    fi
 fi
 echo ""
 
@@ -43,6 +62,11 @@ echo "  ✓ $LOG_DIR/merged"
 # ── Step 2: 复制脚本 ──
 echo ""
 echo "[2/$TOTAL_STEPS] 安装同步脚本..."
+if [ -f "$TARGET_SCRIPT_DIR/sync-session-log.py" ]; then
+    # 备份已有版本
+    cp "$TARGET_SCRIPT_DIR/sync-session-log.py" "$TARGET_SCRIPT_DIR/sync-session-log.py.bak"
+    echo "  ℹ 已备份原有版本 → sync-session-log.py.bak"
+fi
 cp "$SCRIPT_DIR/sync-session-log.py" "$TARGET_SCRIPT_DIR/sync-session-log.py"
 chmod +x "$TARGET_SCRIPT_DIR/sync-session-log.py"
 echo "  ✓ $TARGET_SCRIPT_DIR/sync-session-log.py"
