@@ -242,6 +242,39 @@ chmod +x ~/.claude/scripts/sync-session-log.py
 
 ---
 
+## Copilot API 自动授权脚本
+
+`copilot-api-auth.py` 是一个辅助脚本，用于自动化 [copilot-api](https://github.com/jjleng/copilot-api) 的 GitHub 设备授权流程，让你可以通过 GitHub Copilot 的 Token 来使用 Claude Code。
+
+### 它做了什么
+
+1. 启动 `npx @jeffreycao/copilot-api@latest start`
+2. 监听输出，自动提取 GitHub Device 验证码
+3. 自动打开浏览器跳转到授权页面 + 复制验证码到剪贴板
+4. 等待授权完成后，自动将 token 写入 Claude Code 的 `settings.json`（`env.ANTHROPIC_AUTH_TOKEN`）
+
+### 使用方式
+
+```bash
+python3 copilot-api-auth.py
+```
+
+支持透传参数给 copilot-api：
+
+```bash
+python3 copilot-api-auth.py --port 8080
+```
+
+### 跨平台支持
+
+| 平台 | 剪贴板 | Token 路径 | Settings 路径 |
+|------|--------|-----------|--------------|
+| macOS | `pbcopy` | `~/.local/share/copilot-api/github_token` | `~/.claude/settings.json` |
+| Windows | `clip` | `%LOCALAPPDATA%/copilot-api/github_token` | `%APPDATA%/Claude/settings.json` |
+| Linux | `xclip` / `xsel` | `~/.local/share/copilot-api/github_token` | `~/.claude/settings.json` |
+
+---
+
 ## 自定义配置
 
 通过环境变量自定义日志行为（可在 `~/.zshrc` 或 `~/.bashrc` 中设置）：
@@ -331,6 +364,7 @@ claude-session-log-kit/
 ├── sync-session-log.py                # 核心脚本（放到 ~/.claude/scripts/）
 ├── settings-hook-only.json            # 最小化 settings.json（仅 Hook 部分）
 ├── install.sh                         # 一键安装脚本
+├── copilot-api-auth.py                # Copilot API 自动授权脚本
 └── global-config/                     # 全局配置模板（可选）
     ├── CLAUDE.md                      # 全局行为约定
     ├── settings.json                  # 完整配置（已脱敏，需填 Token）
